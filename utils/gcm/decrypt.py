@@ -2,6 +2,8 @@
 
 import sys
 
+import os
+import hashlib
 import binascii
 import struct
 from Crypto.Util.number import long_to_bytes,bytes_to_long
@@ -30,9 +32,12 @@ if __name__=='__main__':
 	for line in lines:
 		line = line.strip()
 		l = line.split(b": ")
-		vars()[l[0].decode("utf-8")] = l[1].strip().decode("utf-8")
+		if l[1].startswith(b"b'") and l[1][-1] == 39:
+			l[1] = l[1][2:-1]
+		vars()[l[0].decode("utf-8").lower()] = l[1].strip().decode("utf-8")
 
 	for v in ["key1", "key2", "adata", "nonce", "ciphertext", "tag"]:
+		#TODO: sometimes it's 'additionaldata'
 		vars()[v] = binascii.unhexlify(vars()[v])
 
 	assert not key1 == key2
@@ -49,12 +54,16 @@ if __name__=='__main__':
 	if not success:
 		print("Decryption with other key failed didn't fail as expected")
 
-	exts = exts.split(" ")[-2:]
-	with open("output1.%s" % exts[0], "wb") as salfile:
-		salfile.write(plaintxt1)
+	hash = hashlib.sha256(ciphertext).hexdigest()[:8].lower()
 
-	with open("output2.%s" % exts[1], "wb") as pixfile:
-		pixfile.write(plaintxt2)
+	fname = os. path.splitext(fname)[0] # remove file extension
+
+	exts = exts.split(" ")[-2:]
+	with open("%s.%s.%s" % (fname, hash, exts[0]), "wb") as file1:
+		file1.write(plaintxt1)
+
+	with open("%s.%s.%s" % (fname, hash, exts[1]), "wb") as file2:
+		file2.write(plaintxt2)
 
 	print("key1:", key1.rstrip(b"\0"))
 	print("key1:", key2.rstrip(b"\0"))

@@ -7,61 +7,21 @@ import hashlib
 import os.path
 from args import *
 
-__version__ = "0.2" # https://semver.org/
-__date__ = "2020-10-03"
+__version__ = "0.3" # https://semver.org/
+__date__ = "2021-02-19"
 __description__ = "Mitra v%s (%s) by Ange Albertini" % (__version__, __date__)
 
 PARSERS = [
 # magic at 0
-	arj,
-	ar,
-	bmp,
-	bpg,
-	cpio,
-	cab,
-	ebml,
-	elf,
-	flac,
-	flv,
-	gif,
-	icc,
-	ico,
-	ilda,
-	java,
-	jp2,
-	jpg,
-	lnk,
-	id3v2,
-	nes,
-	ogg,
-	pcap,
-	pcapng,
-	pe_hdr,
-	pe_sec,
-	png,
-	psd,
-	riff,
-	svg,
-	tiff,
-	wasm,
-	xz,
+	arj, ar, bmp, bpg, cpio, cab, ebml, elf, flac, flv, gif, icc, ico, ilda, java,
+	jp2, jpg, lnk, id3v2, nes, ogg, pcap, pcapng, pe_sec, pe_hdr, png, psd, riff,
+	svg, tiff, wad, wasm, xz,
 
 # magic potentially further but checked at 0
-	_7z,
-	mp4,
-	pdf,
-	gzip,
-	bzip2,
-	postscript,
-	zip_,
-	rar,
-	rtf,
+	_7z, mp4, pdf, gzip, bzip2, postscript, zip_, rar, rtf,
 
 # magic further
-	dcm,
-	tar,
-	pdfc,
-	iso,
+	dcm, tar, pdfc, iso,
 
 # footer
 	id3v1,
@@ -69,10 +29,12 @@ PARSERS = [
 
 
 def randbuf(length):
-	return bytes([random.randrange(255) for i in range(length)])
+	res = b"\0" * length
+	res = bytes([random.randrange(255) for i in range(length)])
+	return res
 
 
-def separatePayloads(fn, exts, data, swaps):
+def separatePayloads(fn, exts, data, swaps, overlap):
 	NoFile, SplitDir = getVars(["NOFILE", "SPLITDIR"])
 
 	ext1, ext2 = exts
@@ -85,9 +47,10 @@ def separatePayloads(fn, exts, data, swaps):
 
 		start = end
 		p1, p2 = p2, p1
-
 	p1 += data[end:]
 	p2 += randbuf(len(data)-end)
+
+	p2 = overlap + p2[len(overlap):]
 
 	if not NoFile:
 		with open(os.path.join(SplitDir, "%s.%s" % (fn, ext1)), "wb") as f:
@@ -97,14 +60,14 @@ def separatePayloads(fn, exts, data, swaps):
 	return
 
 
-def writeFile(name, exts, data, swaps = []):
+def writeFile(name, exts, data, swaps=[], overlap=b""):
 	OutDir, NoFile, Split = getVars(["OUTDIR", "NOFILE", "SPLIT"])
 
 	random.seed(0)
 	hash = hashlib.sha256(data).hexdigest()[:8].lower()
 
 	if Split and swaps != []:
-		separatePayloads(name, exts, data, swaps)
+		separatePayloads(name, exts, data, swaps, overlap)
 	fn = "%s.%s.%s" % (name, hash, ".".join(exts))
 	if not NoFile:
 		with open(os.path.join(OutDir, "%s" % fn), "wb") as f:
@@ -142,7 +105,7 @@ def isCavOk(ftype1, ftype2):
 		result = False
 
 	if not ftype2.precav_s:
-		dprint("! File type 2 (%s) doesn't have with any cavity." % (ftype2.TYPE))
+		dprint("! File type 2 (%s) doesn't start with any cavity." % (ftype2.TYPE))
 		return False
 	elif filling_l > ftype2.precav_s:
 		dprint("! File 1 is too big (0x%X). File 2's cavity is only 0x%X." % (filling_l, ftype2.precav_s) )
@@ -215,6 +178,7 @@ def Hit(type1, type2):
 	global VERBOSE
 	if getVar("VERBOSE"):
 		dprint("HIT " + ";".join(sorted([type1, type2])))
+
 
 def Stack(ftype1, ftype2, fn1, fn2):
 	if isStackOk(ftype1, ftype2):
@@ -309,6 +273,187 @@ def Cavity(ftype1, ftype2, fn1, fn2):
 		)
 
 
+def JpegOver5(jpeg, other, swaps, overlap):
+	"""pre-process JPEG to require only 5 bytes of overlap instead of 6
+
+	Store the incremented higher nibble
+	 and the other lower nibble
+	Grow the parasite by the minimal amount - up to 0x100 alignment
+	The parasite requires further growing on post-processing
+	 depending on the other lower nibble after encryption once the nonce is known.
+
+	Parameters
+  ----------
+	jpeg: data buffer
+		the JPEG file data with a parasite
+
+	other: data buffer
+		the other original file
+
+	swaps: list of int
+		where data swaps its origin in the final polyglot
+
+	overlap: list of bytes
+		values of overlapping bytes in the other file - should start like `other`
+	"""
+	highnib = jpeg[4]
+	lownib = jpeg[5]
+	offset = 4 + 0x100*highnib + lownib
+
+	if highnib == 0xff                 \
+		or not other.startswith(overlap) \
+		or len(swaps) != 2               \
+		or swaps[0] != 6                 \
+		or len(overlap) != 6:
+		return jpeg, swaps, overlap
+
+	othernib = other[5]
+
+	delta = 0x100 - lownib
+
+	swaps[0] -= 1     # saved one byte
+	swaps[1] += delta # padding
+
+	overlap = overlap[:-1]
+
+	jpeg = b"".join([
+		jpeg[:4],             # 00-03: the original JPG header
+		bytes([highnib + 1]), #   04: 0x100-padded parasite length
+		bytes([othernib]),    #   05: but storing the other byte for later
+		jpeg[6:offset],       # the previous parasite
+		delta*b"\0",          #  with 0x100-padding
+		jpeg[offset:],        # the rest of the JPEG
+		])
+
+	dprint("Jpeg overlap file: reducing one byte")
+	dprint("  (don't forget to postprocess after bruteforcing)")
+	return jpeg, swaps, overlap
+
+
+def JpegOver4(jpeg, other, swaps, overlap):
+	"""pre-process JPEG to require only 4 bytes of overlap instead of 6
+
+	Writes the 2 last byte of the overlap on the file.
+	Remove them from the file name.
+	Decrement the first split from the file name.
+	"""
+	if not other.startswith(overlap) \
+		or len(swaps) != 2             \
+		or swaps[0] != 6               \
+		or len(overlap) != 6:
+		return jpeg, swaps, overlap
+
+	offset = swaps[-1]
+	swaps[0] -= 2
+	overlap = overlap[:-2]
+
+	jpeg = b"".join([
+		jpeg[:4],      # 00-03: the original JPG header
+		other[4:6],    #   04: 0x100-padded parasite length
+		jpeg[6:],      # the previous parasite
+		])
+
+	dprint("Jpeg overlap file: reducing two bytes")
+	dprint("  (don't forget to postprocess after bruteforcing)")
+	return jpeg, swaps, overlap
+
+
+def Overlap(ftype1, ftype2, fn1, fn2, THRESHOLD=6):
+	dprint("Overlapping parasite")
+	if not ftype1.bParasite:
+		dprint("! Parasite not supported.", ftype1.TYPE)
+		return False
+	ftype1.getCut()
+	overlap_l = ftype1.parasite_o
+	if overlap_l is None:
+		print("! Error - overlap is None", ftype1.TYPE)
+		return False
+	if overlap_l > THRESHOLD:
+		dprint("! Overlap (length:%i) too long (threshold:%i)." % (overlap_l, THRESHOLD))
+		return False
+
+	fextra = blob.reader(ftype2.data[overlap_l:])
+	parasitized, swaps = ftype1.parasitize(fextra)
+	if parasitized is None:
+		return False
+
+	overlap = ftype2.data[:overlap_l]
+
+	# if it's a JPEG overlap, we can reduce the overlap by one byte
+	# by abusing the lower nibble of the comment length to match the other type content
+	# but this file is not a valid JPEG as is
+	# the comment is padded to 0x100 alignment,
+	# but the lowest nibble is the other byte before encryptions (w/ unknown nonce at this stage).
+	if ftype1.TYPE == "JPG":
+		parasitized, swaps, overlap = JpegOver4(parasitized, ftype2.data, swaps, overlap)
+
+	overlap_s = "".join("%02X" % c for c in overlap)
+	swapstr = "(%s)" % "-".join("%x" % s for s in swaps) if swaps != [] else ""
+	Hit(ftype1.TYPE, ftype2.TYPE)
+	writeFile(
+		"O%s-%s[%s]{%s}" % (swapstr, ftype1.TYPE, ftype2.TYPE, overlap_s),
+		[ext(fn1), ext(fn2)],
+		parasitized,
+		swaps=swaps,
+		overlap=overlap,	
+	)
+	print("Generic overlapping polyglot file created.")
+	return True
+
+
+def OverlapPE(ftype1, ftype2, fn1, fn2):
+	# reverse overlap:
+	# ftype1 parasitize even if it's ftype2 defining the length
+	# Only applies to PE so far.
+
+	SIG_l = 2        # `MZ` required at 0
+	ELFANEW_o = 0x3c # Offset of first required information
+
+	if not ftype2.TYPE.startswith("PE"):
+		return False
+	overlap_l = SIG_l
+
+	dprint("PE Reverse overlapping parasite")
+	if not ftype1.bParasite:
+		return False
+	if ftype1.parasite_o is None:
+		dprint("! Error - overlap is None", ftype1.TYPE)
+		return False
+	cut = ftype1.getCut()
+	if ftype1.parasite_o > ELFANEW_o:
+		dprint("! Parasite offset too far: type (%s) parasite offset (0x%X)" % (ftype1.TYPE, ftype1.parasite_o))
+		return False
+	if len(ftype2.data) > ftype1.parasite_s:
+		dprint("! PE file (size:%i) can't fit in parasite (max: %i)." % (len(ftype2.data), ftype1.parasite_s))
+		return False
+
+	#FIXME still buggy with: BPG CPIO WASM (wrong offset computation)
+	fextra = blob.reader(ftype2.data[ftype1.parasite_o:])
+	parasitized, swaps = ftype1.parasitize(fextra)
+
+	if parasitized is None:
+		return False
+
+	overlap = ftype2.data[:overlap_l]
+	overlap_s = "".join("%02X" % c for c in overlap)
+	swapstr = "(%s)" % "-".join("%x" % s for s in swaps) if swaps != [] else ""
+	Hit(ftype1.TYPE, ftype2.TYPE)
+	writeFile(
+		"OR%s-%s[%s]{%s}" % (swapstr, ftype1.TYPE, ftype2.TYPE, overlap_s),
+		[ext(fn1), ext(fn2)],
+		parasitized,
+		swaps=swaps,
+		overlap=overlap,
+	)
+	print("Specific PE overlapping polyglot file created.")
+	return True
+
+
+def OverlapAll(ftype1, ftype2, fn1, fn2):
+	OverlapPE(ftype1, ftype2, fn1, fn2)
+	Overlap(ftype1, ftype2, fn1, fn2)
+
+
 ext = lambda s:s[s.rfind(".")+1:]
 
 
@@ -317,6 +462,8 @@ def DoAll(ftype1, ftype2, fn1, fn2):
 	Parasite(ftype1, ftype2, fn1, fn2)
 	Zipper(ftype1, ftype2, fn1, fn2)
 	Cavity(ftype1, ftype2, fn1, fn2)
+	if getVar("OVERLAP"):
+		OverlapAll(ftype1, ftype2, fn1, fn2)
 
 
 def main():

@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import hashes
 
 import base64
 import argparse
+import re
 
 
 DEBUG = True
@@ -31,7 +32,7 @@ gcm_modulus_array = [1] + [0]*120 + [1, 0, 0, 0, 0, 1, 1, 1]
 gcm_modulus = bv.BitVector(bitlist = list(gcm_modulus_array))
 
 
-pad16 = lambda s: s + "\0" * (16-len(s))
+pad16 = lambda s: s + b"\0" * (16-len(s))
 b2a = lambda b: repr(b)[2:-1]
 
 
@@ -59,6 +60,37 @@ for l in invert_data:
 	b = int(els[1], 16)
 	INVERTS[a] = b
 
+def xor(_a1, _a2):
+	assert len(_a1) == len(_a2)
+	return bytes([(_a1[i] ^ _a2[i]) for i in range(len(_a1))])
+
+
+noncesfn = os.path.join(dir_path, "nonces.txt")
+with open(noncesfn, "r") as f:
+	nonce_data = f.readlines()
+NONCES = {}
+for l in nonce_data:
+	if l.count("#") > 0:
+		l = l[:l.find("#")]
+	l = l.strip()
+	if l == "":
+		continue
+	l = re.split('\s+', l)
+	if len(l) != 6:
+		continue
+	nonce,types,header1, header2, key1, key2 = l
+	if len(header1) != len(header2):
+		continue
+	if len(key1) != len(key2):
+		continue
+	nonce = int(nonce, 16)
+	header1 = binascii.unhexlify(header1)
+	header2 = binascii.unhexlify(header2)
+	key1 = binascii.unhexlify(key1)
+	key2 = binascii.unhexlify(key2)
+	xor_hdr = xor(header1, header2)
+#	print(types.ljust(10), binascii.hexlify(xor_hdr).decode(), nonce)
+	NONCES[(xor_hdr, key1, key2)] = nonce
 
 def ifAdd(_a1, _a2):
 	return l2b(b2l(_a1) ^ b2l(_a2), 16)
@@ -66,11 +98,6 @@ def ifAdd(_a1, _a2):
 
 def ifAddL(_a1,_a2):
 	return l2b(_a1 ^ _a2, 16)
-
-
-def xor(_a1, _a2):
-	assert len(_a1) == len(_a2)
-	return bytes([(_a1[i] ^ _a2[i]) for i in range(len(_a1))])
 
 
 def pad(_d, _alig):
@@ -242,8 +269,6 @@ def collide(_key1, _key2, _nonce, _plain, _ad, DEBUG=False, _blockidx=-1):
 	ct_bkl = ct_l // BLOCKLEN
 	ct_bl = 8 * ct_l
 
-	if _blockidx < 0:
-		_blockidx += ct_bkl
 	ad_bl = 8*len(_ad)
 
 	print("blocks:", ct_bkl)
@@ -282,11 +307,6 @@ def getKS(key, nonce, bCount, initCount=2): # initCount = 2 for GCM, 0 for CTR
 	return stream
 
 
-def xor(a1, a2):
-	assert len(a1) == len(a2)
-	return bytes([(a1[i] ^ a2[i]) for i in range(len(a1))])
-
-
 def mix(d1, d2, l):
 	assert len(d1) == len(d2)
 	mix = b""
@@ -306,11 +326,11 @@ if __name__=='__main__':
 		help="input polyglot - requires special naming like 'P(10-5c).png.rar'.")
 	parser.add_argument('output',
 		help="generated file.")
-	parser.add_argument('-k', '--keys', nargs=2, default=["Now?", "L4t3r!!!"],
+	parser.add_argument('-k', '--keys', nargs=2, default=[b"Now?", b"L4t3r!!!"],
 		help="encryption keys - default: Now? / L4t3r!!!.")
-	parser.add_argument('-a', '--additional-data', default="MyVoiceIsMyPass!",
+	parser.add_argument('-a', '--additional-data', default=b"MyVoiceIsMyPass!",
 		help="Additional data - default: MyVoiceIsMyPass!.")
-	parser.add_argument('-n', '--nonce', default=0,
+	parser.add_argument('-n', '--nonce', default="0",
 		help="nonce - default: 0.")
 	parser.add_argument('-i', '--block-index', default=-1,
 		help="Specify block index - default: -1.")
@@ -319,18 +339,22 @@ if __name__=='__main__':
 
 	fnmix = args.polyglot
 	fnpoc = args.output
+	key1, key2 = b"\x01" * 16, b"\x02" * 16
 	key1, key2 = args.keys
 	ad = args.additional_data
 	blockidx = args.block_index
 	nonce = args.nonce
 
-	key1 = pad16(unhextry(key1)).encode()
-	key2 = pad16(unhextry(key2)).encode()
+	key1 = pad16(unhextry(key1))
+	key2 = pad16(unhextry(key2))
 	assert not key1 == key2
 
-	noncei = int(nonce)
-	nonceb = l2b(int(nonce),12)
-	ad = unhextry(ad).encode()
+	if nonce.startswith("0x"):
+		noncei = int(nonce, 16)
+	else:
+		noncei = int(nonce)
+	nonceb = l2b(noncei,12)
+	ad = unhextry(ad)
 	ad = pad(ad, BLOCKLEN)
 
 	# fnmix should come from Mitra and
@@ -341,6 +365,43 @@ if __name__=='__main__':
 
 	with open(fnmix, "rb") as file:
 		dIn = file.read()
+
+	def BruteNonce(fn):
+		hdr1 = fn[fn.find("{")+1:]
+		hdr1 = hdr1[:hdr1.find("}")]
+		hdr1 = binascii.unhexlify(hdr1)
+
+		hdr2 = dIn[:len(hdr1)]
+		hdr_xor = xor(hdr1,hdr2)
+		t = (hdr_xor, key1, key2)
+		if t in NONCES:
+			nonce = NONCES[t]
+			print("Nonce already computed.")
+			return nonce
+		hdr_xor_l = len(hdr_xor)
+		aes1 = AES.new(key1, AES.MODE_ECB)
+		aes2 = AES.new(key2, AES.MODE_ECB)
+
+		i = 0
+		for i in range(2**64):
+			block1 = aes1.encrypt(long_to_bytes((i << 32) + 2, 16))
+			block2 = aes2.encrypt(long_to_bytes((i << 32) + 2, 16))
+
+			if xor(block1[:hdr_xor_l], block2[:hdr_xor_l]) == hdr_xor:
+				return i
+		return None
+
+
+	if fnmix.startswith("O") and \
+		"{" in fnmix and \
+		"}" in fnmix:
+		print("Overlap file found")
+		noncei = BruteNonce(fnmix)
+		nonce = "%i" % noncei
+		nonceb = l2b(noncei,12)
+
+		print("Nonce: %x" % noncei)
+
 	dIn = pad(dIn, BLOCKLEN) # the padding will break with formats not supporting appended data
 
 	assert len(dIn) % 16 == 0
@@ -359,6 +420,14 @@ if __name__=='__main__':
 	if blockidx == -1:
 		dIn += b"\0" * BLOCKLEN
 
+	if blockidx < 0:
+		blockidx += len(dIn) // 16 - 1
+
+	block_target = dIn[16*blockidx:16*(blockidx+1)]
+	if block_target != b"\0" * 16:
+		print("Error: target block is not null")
+		print("%i: %s" % (blockidx, block_target))
+		sys.exit()
 
 	print("key 1:", b2a(key1.strip(b"\0")))
 	print("key 2:", b2a(key2.strip(b"\0")))

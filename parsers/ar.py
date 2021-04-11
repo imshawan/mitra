@@ -53,6 +53,3 @@ class parser(FType):
 
 		hdr = self.makeHdr(b"#1/0", size=l)
 		return hdr + data
-
-	def wrappend(self, data):
-		return self.wrap(data)
